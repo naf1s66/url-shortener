@@ -1,0 +1,24 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Build output
+/url-shortener
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Logs and backups
+*.log
+*.dump
+*.backup
+
+# IDE files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
