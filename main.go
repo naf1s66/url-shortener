@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log"
@@ -40,6 +41,9 @@ func main() {
 	http.HandleFunc("GET /health", healthHandler)
 	http.HandleFunc("POST /shorten", func(w http.ResponseWriter, r *http.Request) {
 		shortenHandler(w, r, pool)
+	})
+	http.HandleFunc("GET /{shortCode}", func(w http.ResponseWriter, r *http.Request) {
+		redirectHandler(w, r, pool)
 	})
 	err = http.ListenAndServe(":8080", nil)
 	if err != nil {
@@ -138,6 +142,45 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 	if err := encoder.Encode(response); err != nil {
 		log.Println("Error encoding response:", err)
 	}
+}
+
+func redirectHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
+	shortCode := r.PathValue("shortCode")
+	var originalURL string
+	var expiresAt sql.NullTime
+	var revokedAt sql.NullTime
+	w.Header().Set("Cache-Control", "no-store")
+	if shortCode == "" {
+		http.Error(w, "Short code is required", http.StatusBadRequest)
+		return
+	}
+	getURLQuery := "SELECT u.url, s.expires_at, s.revoked_at FROM short_urls AS s JOIN urls AS u ON u.id = s.url_id WHERE s.short_code = $1"
+	err := pool.QueryRow(r.Context(), getURLQuery, shortCode).Scan(&originalURL, &expiresAt, &revokedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "Short code not found", http.StatusNotFound)
+			return
+		}
+		log.Printf("Failed to retrieve URL for short code %s: %v", shortCode, err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+	log.Printf(
+		"Resolved %s -> %s | Expires: %v | Revoked: %v",
+		shortCode,
+		originalURL,
+		expiresAt,
+		revokedAt,
+	)
+	if revokedAt.Valid {
+		http.Error(w, "Short code has been revoked", http.StatusNotFound)
+		return
+	}
+	if expiresAt.Valid && !time.Now().Before(expiresAt.Time) {
+		http.Error(w, "Short code has expired", http.StatusGone)
+		return
+	}
+	http.Redirect(w, r, originalURL, http.StatusFound)
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
