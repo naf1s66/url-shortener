@@ -52,7 +52,8 @@ func main() {
 }
 
 type ShortenRequest struct {
-	URL string `json:"url"`
+	URL       string     `json:"url"`
+	ExpiresAt *time.Time `json:"expires_at"`
 }
 
 func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
@@ -63,6 +64,12 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 		return
 	}
 	trimmedURL := strings.TrimSpace(req.URL)
+	if req.ExpiresAt != nil {
+		if !req.ExpiresAt.After(time.Now()) {
+			http.Error(w, "Expiry time cannot be in the past or right now", http.StatusBadRequest)
+			return
+		}
+	}
 	if trimmedURL == "" {
 		http.Error(w, "URL is required", http.StatusBadRequest)
 		return
@@ -113,8 +120,8 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 			return
 		}
 		log.Println("Generated short code:", generatedShortCode)
-		shortCodeInsert := "INSERT INTO short_urls (short_code, url_id) VALUES ($1, $2)"
-		_, err = pool.Exec(r.Context(), shortCodeInsert, generatedShortCode, urlID)
+		shortCodeInsert := "INSERT INTO short_urls (short_code, url_id, expires_at) VALUES ($1, $2, $3)"
+		_, err = pool.Exec(r.Context(), shortCodeInsert, generatedShortCode, urlID, req.ExpiresAt)
 		if err == nil {
 			log.Println("Short code saved successfully:", generatedShortCode)
 			savedSuccessfully = true

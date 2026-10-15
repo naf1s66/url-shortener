@@ -22,6 +22,8 @@ Planned: Redis, Docker, k6, Prometheus, Grafana, GitHub Actions.
 - Short-code persistence
 - Unique constraint detection and bounded collision retries
 - HTTP 201 Created response
+- Optional URL expiration with RFC3339 timestamps
+- Validation of expiration dates before persistence
 
 ## API
 
