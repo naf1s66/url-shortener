@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log"
@@ -107,6 +109,14 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 		}
 	}
 	log.Println("Resolved URL ID:", urlID)
+
+	generatedRevocationToken, generatedHash, err := generateRevocationToken()
+	if err != nil {
+		log.Printf("Failed to generate revocation token: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
 	var generatedShortCode string
 	savedSuccessfully := false
 
@@ -120,8 +130,8 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 			return
 		}
 		log.Println("Generated short code:", generatedShortCode)
-		shortCodeInsert := "INSERT INTO short_urls (short_code, url_id, expires_at) VALUES ($1, $2, $3)"
-		_, err = pool.Exec(r.Context(), shortCodeInsert, generatedShortCode, urlID, req.ExpiresAt)
+		shortCodeInsert := "INSERT INTO short_urls (short_code, url_id, expires_at, revocation_token_hash) VALUES ($1, $2, $3, $4)"
+		_, err = pool.Exec(r.Context(), shortCodeInsert, generatedShortCode, urlID, req.ExpiresAt, generatedHash)
 		if err == nil {
 			log.Println("Short code saved successfully:", generatedShortCode)
 			savedSuccessfully = true
@@ -142,7 +152,8 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	shortenedURL := "http://localhost:8080/" + generatedShortCode
-	response := map[string]string{"received_url": trimmedURL, "shortened_url": shortenedURL}
+	w.Header().Set("Cache-Control", "no-store")
+	response := map[string]string{"received_url": trimmedURL, "shortened_url": shortenedURL, "revocation_token": generatedRevocationToken}
 	httpStatus := http.StatusCreated
 	w.WriteHeader(httpStatus)
 	encoder := json.NewEncoder(w)
@@ -219,4 +230,17 @@ func generateShortCode() (string, error) {
 	}
 	result := builder.String()
 	return result, nil
+}
+
+func generateRevocationToken() (string, []byte, error) {
+	tokenBytes := make([]byte, 32)
+	_, err := rand.Read(tokenBytes)
+	if err != nil {
+		return "", nil, err
+	}
+	tokenString := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	hash := sha256.Sum256(tokenBytes)
+	//hash is array of bytes
+	// [32]byte -> array, []byte -> slice, hash[:] -> slice of hash array
+	return tokenString, hash[:], nil
 }
