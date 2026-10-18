@@ -13,24 +13,16 @@ The goal is to build a production-style URL shortener while learning API design,
 
 **Planned:** Redis, Docker, Docker Compose, k6, Prometheus, Grafana, and GitHub Actions.
 
+
 ## Implemented Features
 
-- HTTP server and health endpoint
-- PostgreSQL connection pooling
-- JSON request handling and URL validation
-- Original URL deduplication using a unique constraint and `ON CONFLICT`
-- Cryptographically secure six-character Base62 short-code generation
-- Collision detection with bounded retries
-- Optional URL expiration using RFC3339 timestamps
-- HTTP `302 Found` redirects with `Cache-Control: no-store`
-- Expired, revoked, and nonexistent link handling (`410` / `404`)
-- Per-link revocation tokens generated with `crypto/rand`
-- SHA-256 revocation-token hashes stored in PostgreSQL
-- Authenticated self-service URL revocation
-- Private administrator token for revoking any existing URL
-- Timing-resistant administrator token comparison
-- Atomic, idempotent revocation using PostgreSQL and `COALESCE`
-- `Cache-Control: no-store` on responses containing sensitive tokens
+- Create shortened URLs from valid HTTP/HTTPS links.
+- Set optional expiration dates for shortened URLs.
+- Redirect visitors to the original destination.
+- Handle expired, revoked, and nonexistent links.
+- Revoke your own links using private revocation tokens.
+- Administratively revoke any link using a private admin token.
+- Check API availability through a health endpoint.
 
 ## API Endpoints
 
@@ -114,8 +106,9 @@ Revocation preserves the original `revoked_at` timestamp through `COALESCE(revok
 
 - Go
 - PostgreSQL
+- GNU Make
 - OpenSSL (for generating the administrator token)
-- Bash (for the startup command below)
+- Bash-compatible shell
 
 ### Setup
 
@@ -143,11 +136,13 @@ Revocation preserves the original `revoked_at` timestamp through `COALESCE(revok
    ADMIN_API_TOKEN='REPLACE_WITH_64_HEXADECIMAL_CHARACTERS'
    ```
 
-7. Run the API from the project directory:
+7. Start the API:
 
    ```bash
-   (set -a; source .env; set +a; go run .)
+   make run
    ```
+
+The Makefile automatically loads `.env` and starts the Go server.
 
 The API listens on `http://localhost:8080`.
 
@@ -165,21 +160,31 @@ Expected response:
 
 > **Security:** Never commit `.env` or share actual administrator or per-link tokens. The localhost HTTP setup is for local development; use HTTPS when deploying the API publicly.
 
-### Current Testing
+### Developer Commands
 
-The endpoint flows have been manually checked with `curl`, including creation, redirect, self-service revocation, administrator revocation, repeated revocation, invalid credentials, and unknown links. Automated unit and integration tests are planned.
+The project uses GNU Make to simplify common development tasks.
 
-Compile/check the Go code with:
+| Command | Description |
+| --- | --- |
+| `make run` | Load `.env` and start the Go server |
+| `make test` | Run Go tests |
+| `make fmt` | Format Go source code |
+| `make vet` | Run Go static analysis |
+| `make check` | Run tests and static analysis |
+| `make help` | Display available commands |
+
+Run all current quality checks with:
 
 ```bash
-gofmt -w main.go
-go test ./...
-go vet ./...
+make check
 ```
+
+The API endpoints have been manually tested using `curl`, including URL creation, redirection, expiration, self-service revocation, administrator revocation, authentication failures, and repeated revocation.
+
+Automated unit and integration tests are planned. Currently, `make test` verifies compilation because no test files have been added yet.
 
 ## Roadmap
 
-- Developer commands with a `Makefile`
 - OpenAPI specification and Swagger UI
 - Configuration and layered-architecture refactoring
 - Automated unit and integration tests
