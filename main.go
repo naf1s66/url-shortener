@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
@@ -23,8 +25,19 @@ import (
 
 func main() {
 	dbURL := os.Getenv("DATABASE_URL")
+	adminAPIToken := os.Getenv("ADMIN_API_TOKEN")
 	if dbURL == "" {
 		log.Fatal("DATABASE_URL environment variable is not set")
+	}
+	// Checking if the admin secret is 64 hexadecimal characters.
+	if len(adminAPIToken) != 64 {
+		log.Fatal("ADMIN_API_TOKEN must be 64 hexadecimal characters")
+	}
+
+	// Decoding the hex string to check that every character is valid.
+	_, err := hex.DecodeString(adminAPIToken)
+	if err != nil {
+		log.Fatal("ADMIN_API_TOKEN contains invalid hexadecimal characters")
 	}
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
@@ -46,6 +59,12 @@ func main() {
 	})
 	http.HandleFunc("GET /{shortCode}", func(w http.ResponseWriter, r *http.Request) {
 		redirectHandler(w, r, pool)
+	})
+	http.HandleFunc("PATCH /{shortCode}/revoke", func(w http.ResponseWriter, r *http.Request) {
+		revokeHandler(w, r, pool)
+	})
+	http.HandleFunc("PATCH /admin/links/{shortCode}/revoke", func(w http.ResponseWriter, r *http.Request) {
+		adminRevokeHandler(w, r, pool, adminAPIToken)
 	})
 	err = http.ListenAndServe(":8080", nil)
 	if err != nil {
@@ -201,6 +220,113 @@ func redirectHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool)
 	http.Redirect(w, r, originalURL, http.StatusFound)
 }
 
+func revokeHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
+	w.Header().Set("Cache-Control", "no-store")
+	// Extracting short code from url
+	shortCode := r.PathValue("shortCode")
+	if shortCode == "" {
+		http.Error(w, "Short code is required", http.StatusBadRequest)
+		return
+	}
+	//Reading auth header
+	authHeader := r.Header.Get("Authorization")
+	//Checking if prefix is Bearer and removing it and extracting string token
+	token, found := strings.CutPrefix(authHeader, "Bearer ")
+	//Returning 401 Unauthorized if token is missing, empty or malformed
+	// strings.TrimSpace helps reject whitespace only tokens too
+	if strings.TrimSpace(token) == "" || !found {
+		//Notifying client which auth scheme this endpoint expects
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "Authentication Token is required", http.StatusUnauthorized)
+		return
+	}
+	//Decoding to get original 32 bytes
+	decodedBytes, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		// Logging for internal analytics while hiding internal details from client
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		log.Printf("Failed to decode token: %v", err)
+		http.Error(w, "Invalid authentication token", http.StatusUnauthorized)
+		return
+	}
+	//Checking if exactly 32 bytes
+	if len(decodedBytes) != 32 {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "Invalid authentication token", http.StatusUnauthorized)
+		return
+	}
+	//Rehashing
+	computedHash := sha256.Sum256(decodedBytes)
+	var revokedAt time.Time
+	// One SQL UPDATE statement to match resource and auth hash atomically to
+	// prevent TOCTOU (time of check to time of use problem)
+	revokeURLQuery := `UPDATE short_urls
+	SET revoked_at = COALESCE(revoked_at, NOW())
+	WHERE short_code = $1
+	AND revocation_token_hash = $2
+	RETURNING revoked_at`
+	err = pool.QueryRow(r.Context(), revokeURLQuery, shortCode, computedHash[:]).Scan(&revokedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Ensuring not broadcasting if short code does not exist or hash does not match
+			http.Error(w, "Resource not found", http.StatusNotFound)
+			return
+		}
+		log.Printf("Failed to revoke URL for short code %s: %v", shortCode, err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func adminRevokeHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, adminToken string) {
+	w.Header().Set("Cache-Control", "no-store")
+	shortCode := r.PathValue("shortCode")
+	if shortCode == "" {
+		http.Error(w, "Short code is required", http.StatusBadRequest)
+		return
+	}
+	//Reading auth header
+	authHeader := r.Header.Get("Authorization")
+	//Checking if prefix is Bearer and removing it and extracting string token
+	token, found := strings.CutPrefix(authHeader, "Bearer ")
+	//Returning 401 Unauthorized if token is missing, empty or malformed
+	// strings.TrimSpace helps reject whitespace only tokens too
+	if strings.TrimSpace(token) == "" || !found {
+		//Notifying client which auth scheme this endpoint expects
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "Authentication Token is required", http.StatusUnauthorized)
+		return
+	}
+	match := subtle.ConstantTimeCompare([]byte(token), []byte(adminToken))
+	if match == 0 {
+		//Notifying client which auth scheme this endpoint expects
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "Authentication Token is invalid", http.StatusUnauthorized)
+		return
+	}
+	// If we reach here, verification of token is done
+	// And we move to db logic
+	// Atomic and idempotent database update to prevent TOCTOU
+	var revokedAt time.Time
+	adminRevokeURLQuery := `UPDATE short_urls
+	SET revoked_at = COALESCE(revoked_at, NOW())
+	WHERE short_code = $1
+	RETURNING revoked_at`
+	err := pool.QueryRow(r.Context(), adminRevokeURLQuery, shortCode).Scan(&revokedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Ensuring not broadcasting if short code does not exist
+			http.Error(w, "Resource not found", http.StatusNotFound)
+			return
+		}
+		log.Printf("Failed to revoke URL for short code %s: %v", shortCode, err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	response := map[string]string{"status": "ok"}
@@ -233,12 +359,16 @@ func generateShortCode() (string, error) {
 }
 
 func generateRevocationToken() (string, []byte, error) {
+	// making slice of 32 bytes, all 0 initially
 	tokenBytes := make([]byte, 32)
+	// Creating 32 bytes
 	_, err := rand.Read(tokenBytes)
 	if err != nil {
 		return "", nil, err
 	}
+	// Bytes to String Token
 	tokenString := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	// Hashed Token
 	hash := sha256.Sum256(tokenBytes)
 	//hash is array of bytes
 	// [32]byte -> array, []byte -> slice, hash[:] -> slice of hash array
