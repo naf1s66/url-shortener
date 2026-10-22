@@ -160,6 +160,33 @@ Expected response:
 
 > **Security:** Never commit `.env` or share actual administrator or per-link tokens. The localhost HTTP setup is for local development; use HTTPS when deploying the API publicly.
 
+
+### API Documentation
+
+Interactive API documentation is available through Swagger UI.
+
+Start the API:
+
+```bash
+make run
+```
+
+Then open:
+
+- **Swagger UI:** http://localhost:8080/docs/
+- **OpenAPI 3.1 specification:** http://localhost:8080/openapi.yaml
+
+Swagger UI documents all five API operations, including their request and response schemas, HTTP status codes, and bearer-token authentication requirements.
+
+**Note:** The redirect endpoint returns HTTP 302. Swagger UI may report a cross-origin fetch error when following redirects to external websites. Open the shortened URL directly in a browser or use `curl -i` to inspect its response.
+
+Validate the OpenAPI specification with:
+
+```bash
+make api-lint
+```
+
+
 ### Developer Commands
 
 The project uses GNU Make to simplify common development tasks.
@@ -172,6 +199,7 @@ The project uses GNU Make to simplify common development tasks.
 | `make vet` | Run Go static analysis |
 | `make check` | Run tests and static analysis |
 | `make help` | Display available commands |
+| `make api-lint` | Validate the OpenAPI specification |
 
 Run all current quality checks with:
 

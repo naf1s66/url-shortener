@@ -23,7 +23,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// main validates config, connects to PostgreSQL, and registers HTTP routes.
 func main() {
+	// Reading  configuration from the process environment
+	// instead of hardcoding secrets
 	dbURL := os.Getenv("DATABASE_URL")
 	adminAPIToken := os.Getenv("ADMIN_API_TOKEN")
 	if dbURL == "" {
@@ -39,11 +42,13 @@ func main() {
 	if err != nil {
 		log.Fatal("ADMIN_API_TOKEN contains invalid hexadecimal characters")
 	}
+	// Limiting databse startup operations to five seconds.
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
 		5*time.Second,
 	)
 	defer cancel()
+	// The connection pool reuses database connections across HTTP requests
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
 		log.Fatal("Unable to create connection pool:", err)
@@ -65,6 +70,15 @@ func main() {
 	})
 	http.HandleFunc("PATCH /admin/links/{shortCode}/revoke", func(w http.ResponseWriter, r *http.Request) {
 		adminRevokeHandler(w, r, pool, adminAPIToken)
+	})
+	// Serve the OpenAPI specification for documentation tools.
+	http.HandleFunc("GET /openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+		http.ServeFile(w, r, "docs/openapi.yaml")
+	})
+	// Serve the Swagger UI documentation page.
+	http.HandleFunc("GET /docs/{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "docs/swagger.html")
 	})
 	err = http.ListenAndServe(":8080", nil)
 	if err != nil {

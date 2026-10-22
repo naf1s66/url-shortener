@@ -1,0 +1,235 @@
+# OpenAPI specification version
+openapi: 3.1.0
+
+info:
+  title: Go URL Shortener API
+  description: A URL shortening API built with Go and PostgreSQL.
+  # API documentation version
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+# Reusable authentication scheme, parameter blocks, responses and schema components.
+components:
+  schemas:
+    ShortCode:
+      type: string
+      description: Six-character, case-sensitive alphanumeric short code.
+      pattern: '^[A-Za-z0-9]{6}$'
+  parameters:
+    ShortCode:
+      name: shortCode
+      in: path
+      required: true
+      description: Unique identifier of a shortened URL.
+      schema:
+        $ref: '#/components/schemas/ShortCode'
+  responses:
+    InternalServerError:
+      description: Internal server or database error.
+      content:
+        text/plain:
+          schema:
+            type: string
+  securitySchemes:
+    LinkRevocationAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: BASE64URL
+      description: Per-link revocation token returned when the short URL is created.
+    AdminRevocationAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Hex
+      description: Global 64-character hexadecimal administrator token configured through ADMIN_API_TOKEN.
+
+# All Paths
+paths:
+  # GET /health
+  /health:
+    get:
+      summary: check HTTP service health
+      operationId: getHealth
+      tags:
+        - Health
+      security: []
+
+      responses:
+        '200':
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - ok
+                required:
+                  - status
+
+  # POST /shorten
+  /shorten:
+    post:
+      summary: Shorten URL
+      operationId: postShorten
+      tags:
+        - Shorten
+      security: []
+      #Valid request body
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url:
+                  type: string
+                  format: uri
+                  description: HTTP or HTTPS destination URL, limited to 2048 UTF-8 bytes after trimming.
+                expires_at:
+                  type:
+                    - string
+                    - 'null'
+                  format: date-time
+                  description: Optional RFC3339 expiration timestamp, which must be in the future.
+              required:
+                - url
+      # Valid response
+      responses:
+        '201':
+          description: URL was shortened
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  received_url:
+                    type: string
+                    format: uri
+                    description: Original URL after trimming surrounding whitespace.
+                  shortened_url:
+                    type: string
+                    format: uri
+                    description: Generated short URL that redirects to the original destination.
+                  revocation_token:
+                    type: string
+                    description: One-time 43-character BASE64URL bearer token used to revoke the short link. Store securely.
+                    minLength: 43
+                    maxLength: 43
+                    pattern: '^[A-Za-z0-9_-]{43}$'
+                required:
+                  - received_url
+                  - shortened_url
+                  - revocation_token
+        '400':
+          description: Invalid JSON, URL, or expiration timestamp.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  # GET {shortCode}
+  /{shortCode}:
+    get:
+      description: >
+        Returns HTTP 302 with the original URL in the Location header.
+        Browser-based API clients may follow the redirect and encounter
+        cross-origin restrictions. To test normal redirect behavior,
+        open the shortened URL directly in a browser.
+      summary: Redirect to original URL
+      operationId: getShortURL
+      tags:
+        - Redirect
+      security: []
+
+      parameters:
+        - $ref: '#/components/parameters/ShortCode'
+      responses:
+        '302':
+          description: Redirect to the original URL.
+          headers:
+            Location:
+              description: The original destination URL.
+              schema:
+                type: string
+                format: uri
+        '404':
+          description: Short code does not exist or has been revoked.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '410':
+          description: URL expired.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /{shortCode}/revoke:
+    patch:
+      summary: Revoke a short URL using its private token
+      operationId: revokeShortURL
+      tags:
+        - Revocation
+
+      security:
+        - LinkRevocationAuth: []
+
+      parameters:
+        - $ref: '#/components/parameters/ShortCode'
+
+      responses:
+        '204':
+          description: Short URL successfully revoked.
+        '401':
+          description: Missing or malformed bearer token.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '404':
+          description: Short code doesn't exist or token does not match.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/links/{shortCode}/revoke:
+    patch:
+      summary: Administratively revoke a short URL
+      operationId: adminRevokeShortURL
+      tags:
+        - Administration
+
+      security:
+        - AdminRevocationAuth: []
+
+      parameters:
+        - $ref: '#/components/parameters/ShortCode'
+      responses:
+        '204':
+          description: Short URL successfully revoked.
+        '401':
+          description: Missing or invalid administrator token.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '404':
+          description: Short code doesn't exist.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '500':
+          $ref: '#/components/responses/InternalServerError'

@@ -1,4 +1,4 @@
-.PHONY: run test fmt vet check help
+.PHONY: run test fmt vet check help api-lint
 
 # View all make commands
 help:
@@ -9,6 +9,7 @@ help:
 	@echo "  make vet       Run static analysis"
 	@echo "  make check     Run tests and static analysis"
 	@echo "  make help      Show available commands"
+	@echo "  make api-lint  Validate the OpenAPI specification"
 
 # Read env and run program
 run:
@@ -28,3 +29,7 @@ vet:
 
 # Run test and static analysis in one go
 check: test vet
+
+# Validate the OpenAPI contract without requiring a global CLI installation.
+api-lint:
+	npx --yes @redocly/cli@2.67.1 lint docs/openapi.yaml --extends=spec

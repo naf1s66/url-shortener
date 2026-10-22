@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Go URL Shortener API Documentation</title>
+
+    <!-- Swagger UI stylesheet -->
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css"
+    />
+  </head>
+  <body>
+    <section style="padding: 20px 35px">
+      <h3>Test a shortened URL</h3>
+      <p>Open a short link in a new tab to test its redirect.</p>
+
+      <form id="redirect-test-form">
+        <input
+          id="short-code"
+          type="text"
+          maxlength="6"
+          placeholder="Enter short code"
+          required
+        />
+        <button type="submit">Open short URL</button>
+      </form>
+    </section>
+    <!-- Swagger UI renders its documentation here -->
+    <div id="swagger-ui"></div>
+
+    <!-- Prebuilt Swagger UI JavaScript -->
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        const form = document.getElementById("redirect-test-form");
+        const input = document.getElementById("short-code");
+
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+
+          const code = input.value.trim();
+
+          if (!/^[A-Za-z0-9]{6}$/.test(code)) {
+            alert("Enter a valid six-character short code.");
+            return;
+          }
+
+          // Normal browser navigation follows redirects without fetch() CORS restrictions.
+          window.open(`/${code}`, "_blank", "noopener,noreferrer");
+        });
+      });
+      window.onload = () => {
+        SwaggerUIBundle({
+          // Fetch the OpenAPI specification from our Go backend.
+          url: "/openapi.yaml",
+          dom_id: "#swagger-ui",
+          deepLinking: true,
+          persistAuthorization: false,
+          validatorUrl: null,
+        });
+      };
+    </script>
+  </body>
+</html>
