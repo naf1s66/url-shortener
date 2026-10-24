@@ -5,71 +5,70 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"database/sql"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
 	"math/big"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/naf1s66/url-shortener/internal/config"
+	"github.com/naf1s66/url-shortener/internal/repository"
 )
 
-// main validates config, connects to PostgreSQL, and registers HTTP routes.
+// main loads config, connects to PostgreSQL, and registers HTTP routes.
 func main() {
-	// Reading  configuration from the process environment
-	// instead of hardcoding secrets
-	dbURL := os.Getenv("DATABASE_URL")
-	adminAPIToken := os.Getenv("ADMIN_API_TOKEN")
-	if dbURL == "" {
-		log.Fatal("DATABASE_URL environment variable is not set")
-	}
-	// Checking if the admin secret is 64 hexadecimal characters.
-	if len(adminAPIToken) != 64 {
-		log.Fatal("ADMIN_API_TOKEN must be 64 hexadecimal characters")
-	}
-
-	// Decoding the hex string to check that every character is valid.
-	_, err := hex.DecodeString(adminAPIToken)
+	// Load and validate application configuration before starting services.
+	cfg, err := config.Load()
 	if err != nil {
-		log.Fatal("ADMIN_API_TOKEN contains invalid hexadecimal characters")
+		log.Fatal(err)
 	}
 	// Limiting databse startup operations to five seconds.
+	// context helps carry cancellation and deadline info across
+	// function calls.
+	// Created context here that allows
+	// operations to run for at most 5 seconds before signalling
+	// that it should stop. We can pass this to other operations
+	// such as database queries, HTTP requests.
+	// But we are only using it for database startup operations in this app.
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
 		5*time.Second,
 	)
+	// Executes when main returns
 	defer cancel()
 	// The connection pool reuses database connections across HTTP requests
-	pool, err := pgxpool.New(ctx, dbURL)
+	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {
 		log.Fatal("Unable to create connection pool:", err)
 	}
 	defer pool.Close()
+	// Pinging DB once.
 	if err := pool.Ping(ctx); err != nil {
 		log.Fatal("Database ping failed:", err)
 	}
 	log.Println("Database connected successfully")
+	// Initializing repository instance
+	repo := repository.New(pool)
+	// Routes
 	http.HandleFunc("GET /health", healthHandler)
 	http.HandleFunc("POST /shorten", func(w http.ResponseWriter, r *http.Request) {
 		shortenHandler(w, r, pool)
 	})
 	http.HandleFunc("GET /{shortCode}", func(w http.ResponseWriter, r *http.Request) {
-		redirectHandler(w, r, pool)
+		redirectHandler(w, r, repo)
 	})
 	http.HandleFunc("PATCH /{shortCode}/revoke", func(w http.ResponseWriter, r *http.Request) {
-		revokeHandler(w, r, pool)
+		revokeHandler(w, r, repo)
 	})
 	http.HandleFunc("PATCH /admin/links/{shortCode}/revoke", func(w http.ResponseWriter, r *http.Request) {
-		adminRevokeHandler(w, r, pool, adminAPIToken)
+		adminRevokeHandler(w, r, repo, cfg.AdminAPIToken)
 	})
 	// Serve the OpenAPI specification for documentation tools.
 	http.HandleFunc("GET /openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
@@ -80,12 +79,16 @@ func main() {
 	http.HandleFunc("GET /docs/{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "docs/swagger.html")
 	})
+	// Server should always start after route registration because ListenAndServe()
+	//  is a blocking function
+	// "nil" means we are using default router
 	err = http.ListenAndServe(":8080", nil)
 	if err != nil {
 		log.Fatal(err)
 	}
 }
 
+// This struct maps the incoming JSON body to Go fields
 type ShortenRequest struct {
 	URL       string     `json:"url"`
 	ExpiresAt *time.Time `json:"expires_at"`
@@ -93,13 +96,16 @@ type ShortenRequest struct {
 
 func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	var req ShortenRequest
+	// Decoding JSON body into ShortenRequest struct.
 	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
+	// Removing leading and trailing whitespace.
 	trimmedURL := strings.TrimSpace(req.URL)
 	if req.ExpiresAt != nil {
+		// Checking if expiry provided is after current time.
 		if !req.ExpiresAt.After(time.Now()) {
 			http.Error(w, "Expiry time cannot be in the past or right now", http.StatusBadRequest)
 			return
@@ -109,6 +115,7 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 		http.Error(w, "URL is required", http.StatusBadRequest)
 		return
 	}
+	// Rejecting URLs longer than 2048 bytes.
 	if len(trimmedURL) > 2048 {
 		http.Error(w, "URL exceeds maximum length of 2048 bytes", http.StatusBadRequest)
 		return
@@ -118,16 +125,25 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 		http.Error(w, "Invalid URL format", http.StatusBadRequest)
 		return
 	}
+	// Ensuring URL provided is an HTTP(S) URL with a hostname.
 	if parsedURL.Hostname() == "" || parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
 		http.Error(w, "Invalid URL format", http.StatusBadRequest)
 		return
 	}
 	var urlID string
+	// Query
+	// ON CONFLICT helps avoid failure when a URL already exists.
 	insertQuery := `INSERT INTO urls (url) VALUES ($1) ON CONFLICT (url) DO NOTHING RETURNING id`
+	// Using context associated with request
+	// This allows DB work to be cancelled with request.
 	err = pool.QueryRow(r.Context(), insertQuery, trimmedURL).Scan(&urlID)
 	if err != nil {
 		switch {
+		// Checking whether returned error matches no returned row error.
+		// This happens when URL already exists so Postgres returns nothing.
 		case errors.Is(err, pgx.ErrNoRows):
+			// No row is inserted so nothing is returned.
+			// Hence we retrieve existing URL's ID.
 			retrieveQuery := `SELECT id FROM urls WHERE url = $1`
 			err = pool.QueryRow(r.Context(), retrieveQuery, trimmedURL).Scan(&urlID)
 			if err != nil {
@@ -151,8 +167,10 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 	}
 
 	var generatedShortCode string
+	// Variable to track successful insertion
 	savedSuccessfully := false
 
+	// 5 bounded retries.
 	for i := 0; i < 5; i++ {
 		var pgErr *pgconn.PgError
 
@@ -163,13 +181,18 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 			return
 		}
 		log.Println("Generated short code:", generatedShortCode)
+		// Every short link has its own code, expiration and revocation-token hash.
 		shortCodeInsert := "INSERT INTO short_urls (short_code, url_id, expires_at, revocation_token_hash) VALUES ($1, $2, $3, $4)"
+		// Executing insert
 		_, err = pool.Exec(r.Context(), shortCodeInsert, generatedShortCode, urlID, req.ExpiresAt, generatedHash)
 		if err == nil {
 			log.Println("Short code saved successfully:", generatedShortCode)
 			savedSuccessfully = true
 			break
 		}
+		// SQLSTATE 23505 refers to a unique constraint violation.
+		// If error is unique violation on short_urls_short_code_key, we retry.
+		// Retry only if collision is specifically on short_code column
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "short_urls_short_code_key" {
 			log.Println("Short code collision detected, retrying...")
 			continue
@@ -178,15 +201,22 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
+	// If all 5 attempts collide
 	if !savedSuccessfully {
 		log.Println("Failed to generate a unique short code after 5 attempts")
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
+	// Returning 201 Created with short URL and its one-time revocation secret
 	w.Header().Set("Content-Type", "application/json")
 	shortenedURL := "http://localhost:8080/" + generatedShortCode
+	// Preventing caching because response contains a private auth token.
 	w.Header().Set("Cache-Control", "no-store")
-	response := map[string]string{"received_url": trimmedURL, "shortened_url": shortenedURL, "revocation_token": generatedRevocationToken}
+	response := map[string]string{
+		"received_url":     trimmedURL,
+		"shortened_url":    shortenedURL,
+		"revocation_token": generatedRevocationToken,
+	}
 	httpStatus := http.StatusCreated
 	w.WriteHeader(httpStatus)
 	encoder := json.NewEncoder(w)
@@ -195,18 +225,14 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 	}
 }
 
-func redirectHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
+func redirectHandler(w http.ResponseWriter, r *http.Request, repo *repository.Repository) {
 	shortCode := r.PathValue("shortCode")
-	var originalURL string
-	var expiresAt sql.NullTime
-	var revokedAt sql.NullTime
 	w.Header().Set("Cache-Control", "no-store")
 	if shortCode == "" {
 		http.Error(w, "Short code is required", http.StatusBadRequest)
 		return
 	}
-	getURLQuery := "SELECT u.url, s.expires_at, s.revoked_at FROM short_urls AS s JOIN urls AS u ON u.id = s.url_id WHERE s.short_code = $1"
-	err := pool.QueryRow(r.Context(), getURLQuery, shortCode).Scan(&originalURL, &expiresAt, &revokedAt)
+	link, err := repo.FindByShortCode(r.Context(), shortCode)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			http.Error(w, "Short code not found", http.StatusNotFound)
@@ -219,22 +245,22 @@ func redirectHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool)
 	log.Printf(
 		"Resolved %s -> %s | Expires: %v | Revoked: %v",
 		shortCode,
-		originalURL,
-		expiresAt,
-		revokedAt,
+		link.OriginalURL,
+		link.ExpiresAt,
+		link.RevokedAt,
 	)
-	if revokedAt.Valid {
+	if link.RevokedAt.Valid {
 		http.Error(w, "Short code has been revoked", http.StatusNotFound)
 		return
 	}
-	if expiresAt.Valid && !time.Now().Before(expiresAt.Time) {
+	if link.ExpiresAt.Valid && !time.Now().Before(link.ExpiresAt.Time) {
 		http.Error(w, "Short code has expired", http.StatusGone)
 		return
 	}
-	http.Redirect(w, r, originalURL, http.StatusFound)
+	http.Redirect(w, r, link.OriginalURL, http.StatusFound)
 }
 
-func revokeHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
+func revokeHandler(w http.ResponseWriter, r *http.Request, repo *repository.Repository) {
 	w.Header().Set("Cache-Control", "no-store")
 	// Extracting short code from url
 	shortCode := r.PathValue("shortCode")
@@ -271,15 +297,7 @@ func revokeHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	}
 	//Rehashing
 	computedHash := sha256.Sum256(decodedBytes)
-	var revokedAt time.Time
-	// One SQL UPDATE statement to match resource and auth hash atomically to
-	// prevent TOCTOU (time of check to time of use problem)
-	revokeURLQuery := `UPDATE short_urls
-	SET revoked_at = COALESCE(revoked_at, NOW())
-	WHERE short_code = $1
-	AND revocation_token_hash = $2
-	RETURNING revoked_at`
-	err = pool.QueryRow(r.Context(), revokeURLQuery, shortCode, computedHash[:]).Scan(&revokedAt)
+	err = repo.RevokeByShortCode(r.Context(), shortCode, computedHash[:])
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Ensuring not broadcasting if short code does not exist or hash does not match
@@ -293,7 +311,7 @@ func revokeHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func adminRevokeHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, adminToken string) {
+func adminRevokeHandler(w http.ResponseWriter, r *http.Request, repo *repository.Repository, adminToken string) {
 	w.Header().Set("Cache-Control", "no-store")
 	shortCode := r.PathValue("shortCode")
 	if shortCode == "" {
@@ -321,13 +339,7 @@ func adminRevokeHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Po
 	}
 	// If we reach here, verification of token is done
 	// And we move to db logic
-	// Atomic and idempotent database update to prevent TOCTOU
-	var revokedAt time.Time
-	adminRevokeURLQuery := `UPDATE short_urls
-	SET revoked_at = COALESCE(revoked_at, NOW())
-	WHERE short_code = $1
-	RETURNING revoked_at`
-	err := pool.QueryRow(r.Context(), adminRevokeURLQuery, shortCode).Scan(&revokedAt)
+	err := repo.AdminRevokeByShortCode(r.Context(), shortCode)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Ensuring not broadcasting if short code does not exist
@@ -350,24 +362,38 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// This function creates a six-character alphanumeric code using secure randomness.
 func generateShortCode() (string, error) {
 	const codeLength = 6
 	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	// Used to incrementally build the short code string.
 	var builder strings.Builder
+	// Byte allocation does initially
+	// Ensuring enough capacity to append {codeLength} additional bytes.
+	// Also avoiding unnecessary buffer growth.
 	builder.Grow(codeLength)
 	alphabetSize := big.NewInt(int64(len(alphabet)))
+	// Loop does 6 iterations.
 	for i := 0; i < codeLength; i++ {
+		// Generates uniformly random index.
+		// Output is a pointer to a bigInt.
 		n, err := rand.Int(
 			rand.Reader,
+			// Upper bound
 			alphabetSize,
 		)
 		if err != nil {
+			// Have to return string so returning empty string on error.
 			return "", err
 		}
+		// Retrieving interger value.
 		index := n.Int64()
+		// Selecting character.
 		char := alphabet[index]
+		// Adding character to string.
 		builder.WriteByte(char)
 	}
+	// Final string.
 	result := builder.String()
 	return result, nil
 }
