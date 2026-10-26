@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"strings"
 )
 
 // Config contains validated application configuration.
@@ -17,8 +18,8 @@ func Load() (Config, error) {
 	cfg := Config{
 		// Reading  configuration from the process environment
 		// instead of hardcoding secrets
-		DatabaseURL:   os.Getenv("DATABASE_URL"),
-		AdminAPIToken: os.Getenv("ADMIN_API_TOKEN"),
+		DatabaseURL:   strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		AdminAPIToken: strings.TrimSpace(os.Getenv("ADMIN_API_TOKEN")),
 	}
 
 	if cfg.DatabaseURL == "" {
