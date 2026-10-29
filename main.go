@@ -227,12 +227,14 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 
 func redirectHandler(w http.ResponseWriter, r *http.Request, repo *repository.Repository) {
 	shortCode := r.PathValue("shortCode")
+	// Checking if link valid
 	w.Header().Set("Cache-Control", "no-store")
 	if shortCode == "" {
 		http.Error(w, "Short code is required", http.StatusBadRequest)
 		return
 	}
 	link, err := repo.FindByShortCode(r.Context(), shortCode)
+	// DB layer error returned by repo handled here
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			http.Error(w, "Short code not found", http.StatusNotFound)
@@ -249,10 +251,12 @@ func redirectHandler(w http.ResponseWriter, r *http.Request, repo *repository.Re
 		link.ExpiresAt,
 		link.RevokedAt,
 	)
+	// Checking if revoked_at is non-NULL.
 	if link.RevokedAt.Valid {
 		http.Error(w, "Short code has been revoked", http.StatusNotFound)
 		return
 	}
+	// Checking if expires_at is non-NULL and if current time not before expiration
 	if link.ExpiresAt.Valid && !time.Now().Before(link.ExpiresAt.Time) {
 		http.Error(w, "Short code has expired", http.StatusGone)
 		return
