@@ -3,6 +3,8 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,6 +25,44 @@ func New(pool *pgxpool.Pool) *Repository {
 		pool: pool,
 	}
 	return repo
+}
+
+func (repo *Repository) GetOrCreateURLID(ctx context.Context, originalURL string) (string, error) {
+	var urlID string
+	// Query
+	// ON CONFLICT helps avoid failure when a URL already exists.
+	insertQuery := `INSERT INTO urls (url) VALUES ($1) ON CONFLICT (url) DO NOTHING RETURNING id`
+	// Using context associated with request
+	// This allows DB work to be cancelled with request.
+	err := repo.pool.QueryRow(ctx, insertQuery, originalURL).Scan(&urlID)
+	if err != nil {
+		switch {
+		// Checking whether returned error matches no returned row error.
+		// This happens when URL already exists so Postgres returns nothing.
+		case errors.Is(err, pgx.ErrNoRows):
+			// No row is inserted so nothing is returned.
+			// Hence we retrieve existing URL's ID.
+			retrieveQuery := `SELECT id FROM urls WHERE url = $1`
+			err = repo.pool.QueryRow(ctx, retrieveQuery, originalURL).Scan(&urlID)
+			if err != nil {
+				return "", err
+			}
+		default:
+			return "", err
+		}
+	}
+	return urlID, nil
+}
+
+func (repo *Repository) CreateShortURL(ctx context.Context, shortCode string, urlID string, expiresAt *time.Time, revocationTokenHash []byte) error {
+	// Every short link has its own code, expiration and revocation-token hash.
+	shortCodeInsert := "INSERT INTO short_urls (short_code, url_id, expires_at, revocation_token_hash) VALUES ($1, $2, $3, $4)"
+	// Executing insert
+	_, err := repo.pool.Exec(ctx, shortCodeInsert, shortCode, urlID, expiresAt, revocationTokenHash)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (repo *Repository) FindByShortCode(ctx context.Context, shortCode string) (URL, error) {

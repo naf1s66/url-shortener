@@ -59,7 +59,7 @@ func main() {
 	// Routes
 	http.HandleFunc("GET /health", healthHandler)
 	http.HandleFunc("POST /shorten", func(w http.ResponseWriter, r *http.Request) {
-		shortenHandler(w, r, pool)
+		shortenHandler(w, r, repo)
 	})
 	http.HandleFunc("GET /{shortCode}", func(w http.ResponseWriter, r *http.Request) {
 		redirectHandler(w, r, repo)
@@ -94,7 +94,7 @@ type ShortenRequest struct {
 	ExpiresAt *time.Time `json:"expires_at"`
 }
 
-func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
+func shortenHandler(w http.ResponseWriter, r *http.Request, repo *repository.Repository) {
 	var req ShortenRequest
 	// Decoding JSON body into ShortenRequest struct.
 	err := json.NewDecoder(r.Body).Decode(&req)
@@ -130,32 +130,11 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 		http.Error(w, "Invalid URL format", http.StatusBadRequest)
 		return
 	}
-	var urlID string
-	// Query
-	// ON CONFLICT helps avoid failure when a URL already exists.
-	insertQuery := `INSERT INTO urls (url) VALUES ($1) ON CONFLICT (url) DO NOTHING RETURNING id`
-	// Using context associated with request
-	// This allows DB work to be cancelled with request.
-	err = pool.QueryRow(r.Context(), insertQuery, trimmedURL).Scan(&urlID)
+	urlID, err := repo.GetOrCreateURLID(r.Context(), trimmedURL)
 	if err != nil {
-		switch {
-		// Checking whether returned error matches no returned row error.
-		// This happens when URL already exists so Postgres returns nothing.
-		case errors.Is(err, pgx.ErrNoRows):
-			// No row is inserted so nothing is returned.
-			// Hence we retrieve existing URL's ID.
-			retrieveQuery := `SELECT id FROM urls WHERE url = $1`
-			err = pool.QueryRow(r.Context(), retrieveQuery, trimmedURL).Scan(&urlID)
-			if err != nil {
-				log.Printf("Failed to retrieve existing URL ID: %v", err)
-				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-				return
-			}
-		default:
-			log.Printf("Failed to save URL: %v", err)
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-			return
-		}
+		log.Printf("Failed to resolve URL ID: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
 	}
 	log.Println("Resolved URL ID:", urlID)
 
@@ -181,10 +160,7 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 			return
 		}
 		log.Println("Generated short code:", generatedShortCode)
-		// Every short link has its own code, expiration and revocation-token hash.
-		shortCodeInsert := "INSERT INTO short_urls (short_code, url_id, expires_at, revocation_token_hash) VALUES ($1, $2, $3, $4)"
-		// Executing insert
-		_, err = pool.Exec(r.Context(), shortCodeInsert, generatedShortCode, urlID, req.ExpiresAt, generatedHash)
+		err = repo.CreateShortURL(r.Context(), generatedShortCode, urlID, req.ExpiresAt, generatedHash)
 		if err == nil {
 			log.Println("Short code saved successfully:", generatedShortCode)
 			savedSuccessfully = true
