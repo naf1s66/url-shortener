@@ -262,26 +262,9 @@ func TestFindByShortCode(t *testing.T) {
 	)
 	defer cancel()
 
-	cleanupShortURLQuery := `DELETE FROM short_urls WHERE short_code = $1`
-
 	testURL, ID := createTestURL(t, ctx, repo, pool)
 
-	shortCode := "Tst003"
-
-	hash := sha256.Sum256([]byte("integration-test-token"))
-
-	err := repo.CreateShortURL(
-		ctx,
-		shortCode,
-		ID,
-		nil,
-		hash[:],
-	)
-	if err != nil {
-		t.Fatalf("Failed to create short URL: %v", err)
-	}
-
-	registerDBCleanup(t, pool, cleanupShortURLQuery, shortCode)
+	shortCode, _ := createTestShortURL(t, ctx, repo, pool, ID, nil)
 
 	retrieved, err := repo.FindByShortCode(ctx, shortCode)
 
@@ -311,31 +294,14 @@ func TestFindByShortCode_WithExpiration(t *testing.T) {
 	)
 	defer cancel()
 
-	cleanupShortURLQuery := `DELETE FROM short_urls WHERE short_code = $1`
-
 	testURL, ID := createTestURL(t, ctx, repo, pool)
-
-	shortCode := "Tst004"
 
 	expiresAt := time.Now().
 		UTC().
 		Add(time.Hour).
 		Truncate(time.Microsecond)
 
-	hash := sha256.Sum256([]byte("integration-test-token"))
-
-	err := repo.CreateShortURL(
-		ctx,
-		shortCode,
-		ID,
-		&expiresAt,
-		hash[:],
-	)
-	if err != nil {
-		t.Fatalf("Failed to create short URL: %v", err)
-	}
-
-	registerDBCleanup(t, pool, cleanupShortURLQuery, shortCode)
+	shortCode, _ := createTestShortURL(t, ctx, repo, pool, ID, &expiresAt)
 
 	retrieved, err := repo.FindByShortCode(ctx, shortCode)
 
@@ -373,30 +339,13 @@ func TestFindByShortCode_WithRevocation(t *testing.T) {
 	)
 	defer cancel()
 
-	cleanupShortURLQuery := `DELETE FROM short_urls WHERE short_code = $1`
-
 	testURL, ID := createTestURL(t, ctx, repo, pool)
 
-	shortCode := "Tst005"
+	shortCode, _ := createTestShortURL(t, ctx, repo, pool, ID, nil)
 
 	revokedAt := time.Now().
 		UTC().
 		Truncate(time.Microsecond)
-
-	hash := sha256.Sum256([]byte("integration-test-token"))
-
-	err := repo.CreateShortURL(
-		ctx,
-		shortCode,
-		ID,
-		nil,
-		hash[:],
-	)
-	if err != nil {
-		t.Fatalf("Failed to create short URL: %v", err)
-	}
-
-	registerDBCleanup(t, pool, cleanupShortURLQuery, shortCode)
 
 	revokeQuery := `UPDATE short_urls
 	SET revoked_at = $1

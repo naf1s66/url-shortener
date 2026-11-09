@@ -4,6 +4,8 @@ package repository
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"testing"
@@ -99,4 +101,49 @@ func createTestURL(
 	registerDBCleanup(t, pool, cleanupURLQuery, ID)
 
 	return testURL, ID
+}
+
+func createTestShortURL(
+	t *testing.T,
+	ctx context.Context,
+	repo *Repository,
+	pool *pgxpool.Pool,
+	urlID string,
+	expiresAt *time.Time,
+) (string, []byte) {
+	t.Helper()
+
+	var randomBytes [3]byte
+
+	_, err := rand.Read(randomBytes[:])
+	if err != nil {
+		t.Fatalf("Failed to generate test short code: %v", err)
+	}
+
+	generatedShortCode := fmt.Sprintf("%x", randomBytes)
+	t.Logf("Generated short code: %s", generatedShortCode)
+
+	hash := sha256.Sum256([]byte("integration-test-token"))
+
+	err = repo.CreateShortURL(
+		ctx,
+		generatedShortCode,
+		urlID,
+		expiresAt,
+		hash[:],
+	)
+	if err != nil {
+		t.Fatalf("Failed to create short URL: %v", err)
+	}
+
+	cleanupShortURLQuery := `DELETE FROM short_urls WHERE short_code = $1`
+
+	registerDBCleanup(
+		t,
+		pool,
+		cleanupShortURLQuery,
+		generatedShortCode,
+	)
+
+	return generatedShortCode, hash[:]
 }
