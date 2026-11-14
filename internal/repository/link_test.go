@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"errors"
 	"fmt"
 	"testing"
@@ -405,5 +406,262 @@ func TestFindByShortCode_NotFound(t *testing.T) {
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		t.Errorf("Expected pgx.ErrNoRows, got %v", err)
+	}
+}
+
+func TestRevokeByShortCode(t *testing.T) {
+	repo, pool := setupTestRepository(t)
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
+	defer cancel()
+
+	_, urlID := createTestURL(t, ctx, repo, pool)
+
+	shortCode, hash := createTestShortURL(
+		t, ctx, repo, pool, urlID, nil,
+	)
+
+	err := repo.RevokeByShortCode(ctx, shortCode, hash)
+	if err != nil {
+		t.Fatalf("Failed to revoke short code: %v", err)
+	}
+
+	revokeCheckQuery := `SELECT revoked_at FROM short_urls WHERE short_code = $1;`
+
+	var revokedAt sql.NullTime
+
+	err = pool.QueryRow(ctx, revokeCheckQuery, shortCode).
+		Scan(&revokedAt)
+
+	if err != nil {
+		t.Fatalf("Failed to check revocation timestamp: %v", err)
+	}
+
+	if !revokedAt.Valid {
+		t.Errorf("Expected a non NULL revocation timestamp")
+	}
+}
+
+func TestRevokeByShortCode_WrongHash(t *testing.T) {
+	repo, pool := setupTestRepository(t)
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
+	defer cancel()
+
+	_, urlID := createTestURL(t, ctx, repo, pool)
+
+	shortCode, _ := createTestShortURL(
+		t, ctx, repo, pool, urlID, nil,
+	)
+
+	wrongHash := sha256.Sum256([]byte("invalid-integration-test-token"))
+
+	err := repo.RevokeByShortCode(ctx, shortCode, wrongHash[:])
+	if err == nil {
+		t.Fatal("Expected pgx.ErrNoRows for invalid revocation token hash, got nil")
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("Expected pgx.ErrNoRows, got %v", err)
+	}
+
+	checkQuery := `SELECT revoked_at FROM short_urls where short_code = $1`
+
+	var updatedRevokedAt sql.NullTime
+	err = pool.QueryRow(ctx, checkQuery, shortCode).Scan(&updatedRevokedAt)
+	if err != nil {
+		t.Fatalf("Failed to retrieve revocation timestamp: %v", err)
+	}
+
+	if updatedRevokedAt.Valid {
+		t.Errorf("Expected revocation timestamp to remain Null, got: %v", updatedRevokedAt.Time)
+	}
+}
+
+func TestRevokeByShortCode_RepeatedRevocation(t *testing.T) {
+	repo, pool := setupTestRepository(t)
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
+	defer cancel()
+
+	_, urlID := createTestURL(t, ctx, repo, pool)
+
+	shortCode, hash := createTestShortURL(
+		t, ctx, repo, pool, urlID, nil,
+	)
+
+	err := repo.RevokeByShortCode(ctx, shortCode, hash)
+	if err != nil {
+		t.Fatalf("Failed to revoke short code: %v", err)
+	}
+
+	revokeCheckQuery := `SELECT revoked_at FROM short_urls WHERE short_code = $1;`
+
+	var firstRevokedAt sql.NullTime
+
+	err = pool.QueryRow(ctx, revokeCheckQuery, shortCode).
+		Scan(&firstRevokedAt)
+
+	if err != nil {
+		t.Fatalf("Failed to check revocation timestamp: %v", err)
+	}
+
+	if !firstRevokedAt.Valid {
+		t.Fatalf("Expected a non NULL revocation timestamp")
+	}
+
+	// Attempting revocation again with same hash
+	err = repo.RevokeByShortCode(ctx, shortCode, hash)
+	if err != nil {
+		t.Fatalf("Failed to revoke short code: %v", err)
+	}
+
+	var secondRevokedAt sql.NullTime
+
+	err = pool.QueryRow(ctx, revokeCheckQuery, shortCode).
+		Scan(&secondRevokedAt)
+
+	if err != nil {
+		t.Fatalf("Failed to check revocation timestamp: %v", err)
+	}
+
+	if !secondRevokedAt.Valid {
+		t.Fatalf("Expected a non NULL revocation timestamp")
+	}
+
+	if !firstRevokedAt.Time.Equal(secondRevokedAt.Time) {
+		t.Errorf(
+			"Expected original revocation timestamp %v, got %v",
+			firstRevokedAt.Time,
+			secondRevokedAt.Time,
+		)
+	}
+
+}
+
+func TestAdminRevokeByShortCode(t *testing.T) {
+	repo, pool := setupTestRepository(t)
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
+	defer cancel()
+
+	_, urlID := createTestURL(t, ctx, repo, pool)
+
+	shortCode, _ := createTestShortURL(
+		t, ctx, repo, pool, urlID, nil,
+	)
+
+	err := repo.AdminRevokeByShortCode(ctx, shortCode)
+	if err != nil {
+		t.Fatalf("Failed to revoke short code: %v", err)
+	}
+
+	revokeCheckQuery := `SELECT revoked_at FROM short_urls WHERE short_code = $1;`
+
+	var revokedAt sql.NullTime
+
+	err = pool.QueryRow(ctx, revokeCheckQuery, shortCode).
+		Scan(&revokedAt)
+
+	if err != nil {
+		t.Fatalf("Failed to check revocation timestamp: %v", err)
+	}
+
+	if !revokedAt.Valid {
+		t.Fatalf("Expected a non NULL revocation timestamp")
+	}
+}
+
+func TestAdminRevokeByShortCode_NotFound(t *testing.T) {
+	repo, _ := setupTestRepository(t)
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
+	defer cancel()
+
+	shortCode := "NA0002"
+	err := repo.AdminRevokeByShortCode(ctx, shortCode)
+	if err == nil {
+		t.Fatal("Expected pgx.ErrNoRows for nonexistent short code, got nil")
+	}
+
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("Expected pgx.ErrNoRows for nonexistent short code, got %v", err)
+	}
+}
+
+func TestAdminRevokeByShortCode_RepeatedRevocation(t *testing.T) {
+	repo, pool := setupTestRepository(t)
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
+	defer cancel()
+
+	_, urlID := createTestURL(t, ctx, repo, pool)
+
+	shortCode, _ := createTestShortURL(
+		t, ctx, repo, pool, urlID, nil,
+	)
+
+	err := repo.AdminRevokeByShortCode(ctx, shortCode)
+	if err != nil {
+		t.Fatalf("Failed to revoke short code: %v", err)
+	}
+
+	revokeCheckQuery := `SELECT revoked_at FROM short_urls WHERE short_code = $1;`
+
+	var firstRevokedAt sql.NullTime
+
+	err = pool.QueryRow(ctx, revokeCheckQuery, shortCode).
+		Scan(&firstRevokedAt)
+
+	if err != nil {
+		t.Fatalf("Failed to check revocation timestamp: %v", err)
+	}
+
+	if !firstRevokedAt.Valid {
+		t.Fatalf("Expected a non NULL revocation timestamp")
+	}
+
+	// Attempting revocation again
+	err = repo.AdminRevokeByShortCode(ctx, shortCode)
+	if err != nil {
+		t.Fatalf("Failed to revoke short code: %v", err)
+	}
+
+	var secondRevokedAt sql.NullTime
+
+	err = pool.QueryRow(ctx, revokeCheckQuery, shortCode).
+		Scan(&secondRevokedAt)
+
+	if err != nil {
+		t.Fatalf("Failed to check revocation timestamp: %v", err)
+	}
+
+	if !secondRevokedAt.Valid {
+		t.Fatalf("Expected a non NULL revocation timestamp")
+	}
+
+	if !firstRevokedAt.Time.Equal(secondRevokedAt.Time) {
+		t.Errorf(
+			"Expected original revocation timestamp %v, got %v",
+			firstRevokedAt.Time,
+			secondRevokedAt.Time,
+		)
 	}
 }
